@@ -15,7 +15,13 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #elif KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+#if defined(__APPLE__)
+// macOS builds use the Linux platform layer but have neither close_range nor /proc.
+#include <crt_externs.h>
+#include <fcntl.h>
+#else
 #include <linux/close_range.h>
+#endif
 #include <unistd.h>
 #endif
 
@@ -101,12 +107,23 @@ int LoadExec(const char* path, const char* const argv[]) {
 	std::fflush(nullptr);
 	std::quick_exit(0);
 #else
-	std::ifstream            command("/proc/self/cmdline", std::ios::binary);
 	std::vector<std::string> host_arguments;
+#if defined(__APPLE__)
+	const int    host_argc     = *_NSGetArgc();
+	char** const host_argv_src = *_NSGetArgv();
+	for (int i = 0; i < host_argc && host_argv_src[i] != nullptr; ++i) {
+		if (std::string_view(host_argv_src[i]) == "--guest-exec") {
+			break;
+		}
+		host_arguments.emplace_back(host_argv_src[i]);
+	}
+#else
+	std::ifstream command("/proc/self/cmdline", std::ios::binary);
 	for (std::string argument;
 	     std::getline(command, argument, '\0') && argument != "--guest-exec";) {
 		host_arguments.push_back(std::move(argument));
 	}
+#endif
 	if (host_arguments.empty()) {
 		return SYSTEM_SERVICE_ERROR_INTERNAL;
 	}
@@ -116,9 +133,21 @@ int LoadExec(const char* path, const char* const argv[]) {
 		host_argv.push_back(argument.data());
 	}
 	host_argv.push_back(nullptr);
+#if defined(__APPLE__)
+	// No close_range: mark every descriptor above stderr close-on-exec individually.
+	long max_fd = sysconf(_SC_OPEN_MAX);
+	if (max_fd <= 0 || max_fd > 65536) {
+		max_fd = 65536;
+	}
+	for (int fd = 3; fd < static_cast<int>(max_fd); ++fd) {
+		fcntl(fd, F_SETFD, FD_CLOEXEC);
+	}
+	execvp(host_argv[0], host_argv.data());
+#else
 	if (close_range(3, ~0u, CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC) == 0) {
 		execvp(host_argv[0], host_argv.data());
 	}
+#endif
 	LOGF("LoadExec failed: %s\n", std::strerror(errno));
 #endif
 	return SYSTEM_SERVICE_ERROR_INTERNAL;
