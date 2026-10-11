@@ -1,0 +1,16 @@
+# Copy to suite.toml (git-ignored) and point `game` at your own dumps.
+# warmup: seconds after the first presented frame to skip (boot, logos, shader compile)
+# seconds: measured window. Pick a repeatable spot: a menu, attract mode, or an idle in-game scene.
+
+[[title]]
+name = "Astro's Playroom"
+game = "D:/ps5/PPSA01325"
+warmup = 90
+seconds = 60
+
+[[title]]
+name = "Demon's Souls"
+game = "D:/ps5/PPSA01342"
+warmup = 120
+seconds = 60
+args = ["--present-mode", "Immediate"]

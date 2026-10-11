@@ -6,3 +6,7 @@ _Build/vscode-clang/
 _Build/
 cmake-build-debug/
 _PipelineCache/
+
+# Local benchmark data (fork)
+bench-results/
+tools/bench/suite.toml
