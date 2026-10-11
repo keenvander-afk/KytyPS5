@@ -401,11 +401,6 @@ add_executable(scalar_provenance_tests EXCLUDE_FROM_ALL
 )
 target_link_libraries(scalar_provenance_tests fmt::fmt xbyak::xbyak)
 target_include_directories(scalar_provenance_tests PRIVATE ${inc_headers})
-if (WIN32)
-	# The test compiles the recompiler passes in one translation unit together with sources
-	# that reach <windows.h>; without NOMINMAX its min/max macros break every std::min/max.
-	target_compile_definitions(scalar_provenance_tests PRIVATE NOMINMAX)
-endif()
 
 add_executable(page_manager_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/PageManagerTests.cpp"
@@ -487,6 +482,14 @@ add_executable(resource_tracking_tests EXCLUDE_FROM_ALL
 )
 target_link_libraries(resource_tracking_tests fmt::fmt xbyak::xbyak)
 target_include_directories(resource_tracking_tests PRIVATE ${inc_headers})
+
+if (WIN32)
+	# These tests compile the recompiler passes in one translation unit together with sources
+	# that reach <windows.h>; without NOMINMAX its min/max macros break every std::min/max.
+	foreach(target scalar_provenance_tests resource_materialization_tests resource_tracking_tests)
+		target_compile_definitions(${target} PRIVATE NOMINMAX)
+	endforeach()
+endif()
 
 add_executable(audio_out2_port_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/AudioOut2PortTests.cpp"
