@@ -1,10 +1,10 @@
 #include "graphics/presentation/window/frameBenchmark.h"
 
-#include <SDL3/SDL.h>
-
 #include "common/logging/log.h"
 
+#include <SDL3/SDL.h>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -16,20 +16,41 @@ namespace Libs::Graphics::FrameBenchmark {
 
 namespace {
 
+constexpr size_t STALL_KINDS = 2;
+
+struct StallTotals {
+	uint64_t ns    = 0;
+	uint32_t count = 0;
+};
+
+// One presented frame and the compile work that completed since the previous present.
+struct Sample {
+	uint64_t                             present_ns = 0;
+	std::array<StallTotals, STALL_KINDS> stalls {};
+};
+
+struct MeasuredFrame {
+	double                               frame_ms = 0.0;
+	std::array<StallTotals, STALL_KINDS> stalls {};
+};
+
 struct State {
-	bool                  initialized = false;
-	bool                  enabled     = false;
-	bool                  finished    = false;
-	uint64_t              warmup_ns   = 0;
-	uint64_t              duration_ns = 0;
-	std::string           out_path;
-	std::FILE*            csv           = nullptr;
-	uint64_t              first_ns      = 0;
-	uint64_t              last_ns       = 0;
-	uint64_t              frame_index   = 0;
-	std::vector<double>   frame_ms;     // measured window only
-	std::mutex            pending_mutex;
-	std::vector<uint64_t> pending;      // present timestamps not yet processed
+	std::once_flag             init_once;
+	std::atomic_bool           enabled     = false;
+	bool                       finished    = false;
+	uint64_t                   warmup_ns   = 0;
+	uint64_t                   duration_ns = 0;
+	std::string                out_path;
+	std::FILE*                 csv         = nullptr;
+	uint64_t                   first_ns    = 0;
+	uint64_t                   last_ns     = 0;
+	uint64_t                   frame_index = 0;
+	std::vector<MeasuredFrame> measured;
+	std::mutex                 pending_mutex;
+	std::vector<Sample>        pending; // presents not yet processed by Poll
+	// Compile work since the last present, filled by any thread.
+	std::array<std::atomic<uint64_t>, STALL_KINDS> stall_ns {};
+	std::array<std::atomic<uint32_t>, STALL_KINDS> stall_count {};
 };
 
 State& GetState() {
@@ -46,22 +67,29 @@ uint64_t EnvSeconds(const char* name, uint64_t def) {
 }
 
 void Init(State& s) {
-	s.initialized = true;
 	s.duration_ns = EnvSeconds("KYTY_BENCH_SECONDS", 0);
 	if (s.duration_ns == 0) {
 		return;
 	}
-	s.enabled   = true;
-	s.warmup_ns = EnvSeconds("KYTY_BENCH_WARMUP", 0);
+	s.warmup_ns     = EnvSeconds("KYTY_BENCH_WARMUP", 0);
 	const char* out = std::getenv("KYTY_BENCH_OUT");
 	s.out_path      = (out != nullptr && *out != '\0') ? out : "kyty_bench.csv";
 	s.csv           = std::fopen(s.out_path.c_str(), "w");
 	if (s.csv != nullptr) {
-		std::fprintf(s.csv, "frame,time_s,frame_ms,measured\n");
+		std::fprintf(s.csv,
+		             "frame,time_s,frame_ms,measured,shader_ms,shaders,pipeline_ms,pipelines\n");
 	}
-	s.frame_ms.reserve(1 << 16);
-	LOGF("FrameBenchmark: warmup %.1fs, duration %.1fs, output %s\n", static_cast<double>(s.warmup_ns) / 1e9,
-	     static_cast<double>(s.duration_ns) / 1e9, s.out_path.c_str());
+	s.measured.reserve(1 << 16);
+	s.enabled.store(true, std::memory_order_release);
+	LOGF("FrameBenchmark: warmup %.1fs, duration %.1fs, output %s\n",
+	     static_cast<double>(s.warmup_ns) / 1e9, static_cast<double>(s.duration_ns) / 1e9,
+	     s.out_path.c_str());
+}
+
+State& Ready() {
+	auto& s = GetState();
+	std::call_once(s.init_once, Init, std::ref(s));
+	return s;
 }
 
 double Percentile(std::vector<double> v, double p) {
@@ -74,13 +102,27 @@ double Percentile(std::vector<double> v, double p) {
 }
 
 void WriteSummary(State& s) {
-	const auto&  ms     = s.frame_ms;
-	double       total  = 0.0;
-	for (double m: ms) {
-		total += m;
+	std::vector<double> ms;
+	ms.reserve(s.measured.size());
+	double                               total = 0.0;
+	std::array<StallTotals, STALL_KINDS> stalls {};
+	uint32_t                             frames_with_compile = 0;
+	for (const auto& f: s.measured) {
+		ms.push_back(f.frame_ms);
+		total += f.frame_ms;
+		bool compiled = false;
+		for (size_t k = 0; k < STALL_KINDS; k++) {
+			stalls[k].ns += f.stalls[k].ns;
+			stalls[k].count += f.stalls[k].count;
+			compiled |= f.stalls[k].count != 0;
+		}
+		frames_with_compile += compiled ? 1u : 0u;
 	}
 	const double avg_ms  = ms.empty() ? 0.0 : total / static_cast<double>(ms.size());
 	const double avg_fps = total > 0.0 ? 1000.0 * static_cast<double>(ms.size()) / total : 0.0;
+	const double p50     = Percentile(ms, 0.50);
+	const double p99     = Percentile(ms, 0.99);
+
 	// "1% low": average FPS of the slowest 1% of frames.
 	std::vector<double> sorted = ms;
 	std::sort(sorted.begin(), sorted.end(), std::greater<>());
@@ -90,56 +132,90 @@ void WriteSummary(State& s) {
 		low_ms += sorted[i];
 	}
 	low_ms /= static_cast<double>(n_low);
-	const double p50 = Percentile(ms, 0.50);
-	const double p99 = Percentile(ms, 0.99);
+
+	// A spike is a frame taking more than twice the median; split them by whether
+	// shader or pipeline compilation landed in that frame.
+	uint32_t spikes              = 0;
+	uint32_t spikes_with_compile = 0;
+	for (const auto& f: s.measured) {
+		if (p50 > 0.0 && f.frame_ms > 2.0 * p50) {
+			spikes++;
+			if (f.stalls[0].count != 0 || f.stalls[1].count != 0) {
+				spikes_with_compile++;
+			}
+		}
+	}
 
 	const std::string path = s.out_path + ".summary.json";
 	if (std::FILE* f = std::fopen(path.c_str(), "w"); f != nullptr) {
 		std::fprintf(f,
-		             "{\n  \"frames\": %zu,\n  \"seconds\": %.3f,\n  \"avg_fps\": %.2f,\n  \"one_percent_low_fps\": %.2f,\n"
-		             "  \"avg_frame_ms\": %.3f,\n  \"p50_frame_ms\": %.3f,\n  \"p99_frame_ms\": %.3f,\n"
-		             "  \"max_frame_ms\": %.3f\n}\n",
-		             ms.size(), total / 1000.0, avg_fps, low_ms > 0.0 ? 1000.0 / low_ms : 0.0, avg_ms, p50, p99,
-		             sorted.empty() ? 0.0 : sorted.front());
+		             "{\n  \"frames\": %zu,\n  \"seconds\": %.3f,\n  \"avg_fps\": %.2f,\n"
+		             "  \"one_percent_low_fps\": %.2f,\n  \"avg_frame_ms\": %.3f,\n  "
+		             "\"p50_frame_ms\": %.3f,\n"
+		             "  \"p99_frame_ms\": %.3f,\n  \"max_frame_ms\": %.3f,\n"
+		             "  \"shader_compiles\": %u,\n  \"shader_compile_ms\": %.3f,\n"
+		             "  \"pipeline_creates\": %u,\n  \"pipeline_create_ms\": %.3f,\n"
+		             "  \"frames_with_compiles\": %u,\n  \"spike_frames\": %u,\n"
+		             "  \"spike_frames_with_compiles\": %u\n}\n",
+		             ms.size(), total / 1000.0, avg_fps, low_ms > 0.0 ? 1000.0 / low_ms : 0.0,
+		             avg_ms, p50, p99, sorted.empty() ? 0.0 : sorted.front(), stalls[0].count,
+		             static_cast<double>(stalls[0].ns) / 1e6, stalls[1].count,
+		             static_cast<double>(stalls[1].ns) / 1e6, frames_with_compile, spikes,
+		             spikes_with_compile);
 		std::fclose(f);
 	}
-	LOGF("FrameBenchmark: %zu frames, avg %.2f fps, 1%% low %.2f fps, p99 %.2f ms -> %s\n", ms.size(), avg_fps,
-	     low_ms > 0.0 ? 1000.0 / low_ms : 0.0, p99, path.c_str());
+	LOGF("FrameBenchmark: %zu frames, avg %.2f fps, 1%% low %.2f fps, p99 %.2f ms, "
+	     "%u shader compiles (%.1f ms), %u pipelines (%.1f ms), %u/%u spikes during compiles -> "
+	     "%s\n",
+	     ms.size(), avg_fps, low_ms > 0.0 ? 1000.0 / low_ms : 0.0, p99, stalls[0].count,
+	     static_cast<double>(stalls[0].ns) / 1e6, stalls[1].count,
+	     static_cast<double>(stalls[1].ns) / 1e6, spikes_with_compile, spikes, path.c_str());
 }
 
 } // namespace
 
+bool Enabled() {
+	return Ready().enabled.load(std::memory_order_acquire);
+}
+
+void RecordStall(Stall kind, uint64_t ns) {
+	auto&      s = GetState();
+	const auto k = static_cast<size_t>(kind);
+	s.stall_ns[k].fetch_add(ns, std::memory_order_relaxed);
+	s.stall_count[k].fetch_add(1, std::memory_order_relaxed);
+}
+
 void OnPresent() {
-	auto& s = GetState();
-	if (!s.initialized) {
-		Init(s);
-	}
-	if (!s.enabled) {
+	auto& s = Ready();
+	if (!s.enabled.load(std::memory_order_relaxed)) {
 		return;
 	}
-	const uint64_t   now = SDL_GetTicksNS();
+	Sample sample;
+	sample.present_ns = SDL_GetTicksNS();
+	for (size_t k = 0; k < STALL_KINDS; k++) {
+		sample.stalls[k].ns    = s.stall_ns[k].exchange(0, std::memory_order_relaxed);
+		sample.stalls[k].count = s.stall_count[k].exchange(0, std::memory_order_relaxed);
+	}
 	std::scoped_lock lock(s.pending_mutex);
-	s.pending.push_back(now);
+	s.pending.push_back(sample);
 }
 
 bool Poll() {
-	auto& s = GetState();
-	if (!s.initialized) {
-		Init(s);
-	}
-	if (!s.enabled) {
+	auto& s = Ready();
+	if (!s.enabled.load(std::memory_order_relaxed)) {
 		return false;
 	}
 	if (s.finished) {
 		return true;
 	}
 
-	std::vector<uint64_t> batch;
+	std::vector<Sample> batch;
 	{
 		std::scoped_lock lock(s.pending_mutex);
 		batch.swap(s.pending);
 	}
-	for (uint64_t t: batch) {
+	for (const auto& sample: batch) {
+		const uint64_t t = sample.present_ns;
 		if (s.first_ns == 0) {
 			s.first_ns = t;
 			s.last_ns  = t;
@@ -151,11 +227,14 @@ bool Poll() {
 		s.last_ns               = t;
 		s.frame_index++;
 		if (measured) {
-			s.frame_ms.push_back(frame_ms);
+			s.measured.push_back({.frame_ms = frame_ms, .stalls = sample.stalls});
 		}
 		if (s.csv != nullptr) {
-			std::fprintf(s.csv, "%llu,%.6f,%.3f,%d\n", static_cast<unsigned long long>(s.frame_index),
-			             static_cast<double>(since) / 1e9, frame_ms, measured ? 1 : 0);
+			std::fprintf(s.csv, "%llu,%.6f,%.3f,%d,%.3f,%u,%.3f,%u\n",
+			             static_cast<unsigned long long>(s.frame_index),
+			             static_cast<double>(since) / 1e9, frame_ms, measured ? 1 : 0,
+			             static_cast<double>(sample.stalls[0].ns) / 1e6, sample.stalls[0].count,
+			             static_cast<double>(sample.stalls[1].ns) / 1e6, sample.stalls[1].count);
 		}
 		if (since >= s.warmup_ns + s.duration_ns) {
 			s.finished = true;

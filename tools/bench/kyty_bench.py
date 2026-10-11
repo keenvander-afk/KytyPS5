@@ -151,12 +151,14 @@ def main() -> int:
         prev = best_previous(args.results, rec["title"], rec["run_dir"])
         rows.append((rec, prev))
 
-    print("\n| Title | Outcome | Avg FPS | 1% low | p99 ms | Best before |")
-    print("|---|---|---:|---:|---:|---:|")
+    print("\n| Title | Outcome | Avg FPS | 1% low | p99 ms | Spikes (compile) | Shader ms | Pipeline ms | Best before |")
+    print("|---|---|---:|---:|---:|---:|---:|---:|---:|")
     for rec, prev in rows:
         before = f"{prev['avg_fps']:.1f} ({prev['commit']})" if prev else "—"
+        spikes = f"{rec.get('spike_frames', 0)} ({rec.get('spike_frames_with_compiles', 0)})"
         print(f"| {rec['title']} | {rec['outcome']} | {rec.get('avg_fps', 0):.1f} | {rec.get('one_percent_low_fps', 0):.1f} | "
-              f"{rec.get('p99_frame_ms', 0):.1f} | {before} |")
+              f"{rec.get('p99_frame_ms', 0):.1f} | {spikes} | {rec.get('shader_compile_ms', 0):.0f} | "
+              f"{rec.get('pipeline_create_ms', 0):.0f} | {before} |")
     return 0 if all(r["outcome"] == "completed" for r, _ in rows) else 1
 
 

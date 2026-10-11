@@ -10,3 +10,4 @@ _PipelineCache/
 # Local benchmark data (fork)
 bench-results/
 tools/bench/suite.toml
+__pycache__/

@@ -13,6 +13,12 @@ The benchmark is controlled by environment variables, which the script sets:
 | `KYTY_BENCH_OUT` | Per-frame CSV path. The summary goes to `<path>.summary.json`. |
 
 The summary records average FPS, 1% low FPS, and p50, p99 and max frame time.
+It also records how much shader translation and pipeline creation happened in
+the measured window (`shader_compiles`, `shader_compile_ms`, `pipeline_creates`,
+`pipeline_create_ms`). Spikes are frames slower than 2× the median, and
+`spike_frames_with_compiles` counts how many of them overlap compile work. The
+CSV has the same split per frame, so stutter can be blamed on compilation (or
+cleared of it) before anyone guesses at a fix.
 The emulator exits by itself when the window ends, or 5 s later if frames stop
 arriving.
 

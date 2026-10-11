@@ -13,8 +13,8 @@
 #include "graphics/presentation/presenter.h"
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/videoOut.h"
-#include "graphics/presentation/window/windowInternal.h"
 #include "graphics/presentation/window/frameBenchmark.h"
+#include "graphics/presentation/window/windowInternal.h"
 
 #include <algorithm>
 #include <array>
