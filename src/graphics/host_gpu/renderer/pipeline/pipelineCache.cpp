@@ -14,6 +14,7 @@
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/presentation/window/frameBenchmark.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "kernel/memory.h"
@@ -362,6 +363,10 @@ struct PipelineCache::ProgramCache {
 			}
 		}
 
+		// Cache miss: everything from here to the return is translation and SPIR-V compilation
+		// work that blocks the draw.
+		FrameBenchmark::ScopedStall compile_stall(FrameBenchmark::Stall::ShaderCompile);
+
 		ShaderStageInputInfo stage_input {};
 		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
 			stage_input.vertex = &input_info;
@@ -440,10 +445,10 @@ struct PipelineCache::ProgramCache {
 		input_info.stage = {.program = &permutation.program, .resources = &entry->second.resources};
 		permutation.program.bindings.AdvancePushData(push_data_cursor);
 
-		std::array<size_t, static_cast<size_t>(ShaderType::TessellationEvaluation) + 1> counts {};
-		for (const auto& [key, source]: programs) {
-			counts[static_cast<size_t>(key.stage)] += source.permutations.size();
-		}
+		// Running totals: recounting every cached program after each compile cost O(programs)
+		// on the draw path exactly when a title is already stalled on new shaders.
+		auto& counts = permutation_counts;
+		counts[static_cast<size_t>(stage)]++;
 		// Guest geometry shaders are compiled through the host mesh stage.
 		std::printf("Shaders: VS %zu | PS %zu | CS %zu | GS %zu | LS %zu | HS %zu | TES %zu\n",
 		            counts[static_cast<size_t>(ShaderType::Vertex)],
@@ -469,6 +474,8 @@ struct PipelineCache::ProgramCache {
 	}
 
 	std::unordered_map<ProgramKey, SourceEntry, ProgramKeyHash> programs;
+	std::array<size_t, static_cast<size_t>(ShaderType::TessellationEvaluation) + 1>
+	                                                            permutation_counts {};
 	ProgramKey                                                  lookup_key;
 	vk::Device                                                  device;
 	uint64_t                                                    next_shader_id = 0;
@@ -943,8 +950,11 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 
 	auto cached = std::make_unique<Pipeline>();
 	LogPipelineTrace("CreatePipelineInternal begin", vs_id, ps_id);
-	CreatePipelineInternal(m_graphics, *cached, rendering, key.vertex_input, vertex_info,
-	                       ps_input_info, programs, static_params, m_driver_cache);
+	{
+		FrameBenchmark::ScopedStall create_stall(FrameBenchmark::Stall::PipelineCreate);
+		CreatePipelineInternal(m_graphics, *cached, rendering, key.vertex_input, vertex_info,
+		                       ps_input_info, programs, static_params, m_driver_cache);
+	}
 	LogPipelineTrace("CreatePipelineInternal done", vs_id, ps_id);
 
 	EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
@@ -973,7 +983,11 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 	}
 
 	auto cached = std::make_unique<Pipeline>();
-	CreatePipelineInternal(m_graphics, *cached, input_info, compute_program.module, m_driver_cache);
+	{
+		FrameBenchmark::ScopedStall create_stall(FrameBenchmark::Stall::PipelineCreate);
+		CreatePipelineInternal(m_graphics, *cached, input_info, compute_program.module,
+		                       m_driver_cache);
+	}
 
 	EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
 	EXIT_NOT_IMPLEMENTED(cached->pipeline_layout == nullptr);

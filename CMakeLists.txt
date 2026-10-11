@@ -438,6 +438,13 @@ add_executable(lru_cache_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(lru_cache_tests PRIVATE ${inc_headers})
 
+add_executable(frame_benchmark_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/FrameBenchmarkTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/presentation/window/frameBenchmark.cpp"
+)
+target_link_libraries(frame_benchmark_tests common fmt::fmt SDL3::SDL3-static)
+target_include_directories(frame_benchmark_tests PRIVATE ${inc_headers})
+
 add_executable(ime_dialog_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ImeDialogTests.cpp"
 	"${KYTY_SOURCE_DIR}/libs/imeCommon.cpp"
@@ -482,6 +489,14 @@ add_executable(resource_tracking_tests EXCLUDE_FROM_ALL
 )
 target_link_libraries(resource_tracking_tests fmt::fmt xbyak::xbyak)
 target_include_directories(resource_tracking_tests PRIVATE ${inc_headers})
+
+if (WIN32)
+	# These tests compile the recompiler passes in one translation unit together with sources
+	# that reach <windows.h>; without NOMINMAX its min/max macros break every std::min/max.
+	foreach(target scalar_provenance_tests resource_materialization_tests resource_tracking_tests)
+		target_compile_definitions(${target} PRIVATE NOMINMAX)
+	endforeach()
+endif()
 
 add_executable(audio_out2_port_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/AudioOut2PortTests.cpp"
@@ -620,6 +635,7 @@ if(BUILD_TESTING)
 	add_test(NAME avplayer_file COMMAND $<TARGET_FILE:avplayer_file_tests>)
 	add_test(NAME bit_array COMMAND $<TARGET_FILE:bit_array_tests>)
 	add_test(NAME lru_cache COMMAND $<TARGET_FILE:lru_cache_tests>)
+	add_test(NAME frame_benchmark COMMAND $<TARGET_FILE:frame_benchmark_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
 	add_test(NAME resource_materialization COMMAND $<TARGET_FILE:resource_materialization_tests>)
 	add_test(NAME resource_tracking COMMAND $<TARGET_FILE:resource_tracking_tests>)

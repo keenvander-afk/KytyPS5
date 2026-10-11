@@ -1,0 +1,44 @@
+name: Sync upstream
+
+# Keeps this fork's `upstream-main` branch identical to KytyPS5/KytyPS5 main and
+# opens (or refreshes) a PR merging new upstream work into `main`.
+
+on:
+  schedule:
+    - cron: "41 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    if: github.repository != 'KytyPS5/KytyPS5'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Mirror upstream main
+        run: |
+          git remote add upstream https://github.com/KytyPS5/KytyPS5.git
+          git fetch --no-tags upstream main
+          git push origin "refs/remotes/upstream/main:refs/heads/upstream-main" --force
+
+      - name: Open merge PR when main is behind
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          behind=$(git rev-list --count origin/main..upstream/main)
+          echo "main is $behind commits behind upstream"
+          if [ "$behind" -eq 0 ]; then exit 0; fi
+          existing=$(gh pr list --head upstream-main --base main --state open --json number --jq '.[0].number')
+          if [ -z "$existing" ]; then
+            gh pr create --head upstream-main --base main \
+              --title "Merge upstream KytyPS5 ($behind commits)" \
+              --body "Automated: merges the latest KytyPS5/KytyPS5 main into this fork. Check CI and run the benchmark suite before merging."
+          else
+            gh pr edit "$existing" --title "Merge upstream KytyPS5 ($behind commits)"
+          fi
