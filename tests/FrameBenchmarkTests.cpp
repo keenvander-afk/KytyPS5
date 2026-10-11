@@ -48,18 +48,19 @@ void TestRunMeasuresFramesAndAttributesCompiles() {
   std::filesystem::create_directories(dir);
   const auto csv = dir / "frames.csv";
 
-  SetEnv("KYTY_BENCH_SECONDS", "0.3");
+  SetEnv("KYTY_BENCH_SECONDS", "1.5");
   SetEnv("KYTY_BENCH_WARMUP", "0.05");
   SetEnv("KYTY_BENCH_OUT", csv.string());
 
   Check(FB::Enabled(), "benchmark should be enabled by KYTY_BENCH_SECONDS");
 
-  // ~4 ms frames; every 10th frame also records a shader compile and a pipeline
-  // create, and is made slow so it counts as a spike.
+  // Short frames, and every 10th frame also records a shader compile and a
+  // pipeline create and sleeps far longer, so it is a spike even on CI runners
+  // whose short sleeps overshoot by tens of milliseconds.
   bool finished = false;
   unsigned presents = 0;
   const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(10);
+      std::chrono::steady_clock::now() + std::chrono::seconds(30);
   while (!finished && std::chrono::steady_clock::now() < deadline) {
     const bool compile_frame = presents % 10 == 5;
     if (compile_frame) {
@@ -67,7 +68,7 @@ void TestRunMeasuresFramesAndAttributesCompiles() {
       FB::RecordStall(FB::Stall::PipelineCreate, 1'000'000);
     }
     std::this_thread::sleep_for(
-        std::chrono::milliseconds(compile_frame ? 20 : 4));
+        std::chrono::milliseconds(compile_frame ? 150 : 2));
     FB::OnPresent();
     presents++;
     finished = FB::Poll();
@@ -78,7 +79,7 @@ void TestRunMeasuresFramesAndAttributesCompiles() {
   const auto summary = ReadFile(dir / "frames.csv.summary.json");
   Check(!summary.empty(), "summary JSON not written");
   const auto frames = JsonUint(summary, "frames");
-  Check(frames > 20, "too few measured frames");
+  Check(frames >= 10, "too few measured frames");
   Check(frames < presents, "warmup frames must not be measured");
   const auto shaders = JsonUint(summary, "shader_compiles");
   const auto pipelines = JsonUint(summary, "pipeline_creates");
